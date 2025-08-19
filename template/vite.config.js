@@ -1,75 +1,56 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import path from "path";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import bundleAnalyzer from "rollup-plugin-bundle-analyzer";
 import postCssPxToRem from "postcss-pxtorem";
 import autoprefixer from "autoprefixer";
 import terser from "@rollup/plugin-terser";
-import { babel } from "@rollup/plugin-babel";
+// 雪碧图
+import Spritesmith from "vite-plugin-spritesmith";
+import spriteTemplate from "./src/common/js/spriteTemplate.js";
 
 // 获取执行时的参数 --report, 用于打包分析
-const npm_lifecycle_script = process.env.npm_lifecycle_script;
+const npm_lifecycle_script = process.env.npm_lifecycle_script || "";
 const isReport = npm_lifecycle_script.indexOf("--report") > -1;
+// 雪碧图功能开关
+const enableSprite = process.env.VITE_ENABLE_SPRITE === 'true';
+
 // https://vitejs.dev/config/
 export default ({ mode }) => {
-	const isProduction = mode.indexOf("prod") > -1 || mode.indexOf("entfeds") > -1;
-	// const isProduction = true;
+	const env = loadEnv(mode, process.cwd());
+	console.log("🚀 ~ file: vite.config.js:20 ~ env:", env);
+	const isProduction = mode !== "development";
 	return defineConfig({
 		base: "./",
+		// 优化依赖预构建
+		optimizeDeps: {
+			include: [
+				"svelte",
+				"svelte/transition",
+				"svelte/store",
+				"svelte-spa-router",
+				"svelte-i18n",
+				"axios"
+			],
+			exclude: ["@shareit/ad-lib", "@shareit/hummer-components-anyjs"]
+		},
 		server: {
 			port: 5173,
-			// proxy: {
-			// 	'/games': {
-			// 		target: 'http://192.168.13.15:4551',
-			// 		port: 4551,
-			// 		changeOrigin: true,
-			// 		rewrite: (path) => path.replace(/^\/games/, '')
-			// 	}
-			// }
-			fs: {
-				strict: false,
-				// 添加根目录中的 games 文件夹到 Vite 服务器
-				allow: ["games"]
+			proxy: {
+				"/video": {
+					target: env.VITE_VIDEO_API_HOST,
+					changeOrigin: true,
+					rewrite: (path) => path.replace(/^\/video/, "")
+				}
 			}
+			// 配置后可以在DEV模式访问该目录
+			// fs: {
+			// 	strict: false,
+			// 	allow: ["games"]
+			// }
 		},
 		plugins: [
 			svelte(),
-			babel({
-				babelHelpers: "bundled",
-				presets: [
-					[
-						"@babel/preset-env",
-						{
-							targets: "> 0.25%, not dead, ie 11", // 设置目标浏览器环境为支持 ES5 的浏览器，如 IE11
-							modules: false
-						}
-					]
-				],
-				exclude: "node_modules/**" // 排除 node_modules 目录
-			}),
-			// createHtmlPlugin({
-			// 	inject: {
-			// 		injectData: {
-			// 			VITE_INCLUDE_CP: process.env.VITE_INCLUDE_CP
-			// 		}
-			// 	},
-			// 	minify: true,
-			// }),
-			{
-				name: "html-transform",
-				transformIndexHtml: {
-					handler(html, { path }) {
-						if (path === "/index.html") {
-							// 修改路径为你的目标路径
-							return html.replace(
-								"<!-- VITE_INCLUDE_CP === 'saagi' -->",
-								process.env.VITE_INCLUDE_CP === "saagi" ? process.env.VITE_APP_CP_URL : ""
-							);
-						}
-						return html;
-					}
-				}
-			},
 			isReport ? bundleAnalyzer() : null,
 			isProduction
 				? terser({
@@ -81,6 +62,32 @@ export default ({ mode }) => {
 							drop_debugger: true
 						}
 					})
+				: null,
+			enableSprite
+				? Spritesmith({
+						watch: isProduction ? false : true,
+						src: {
+							cwd: "./src/assets/images/spriteIcons",
+							glob: "*.png"
+						},
+						target: {
+							image: "./src/assets/images/sprite.png",
+							css: [
+								[
+									"./src/common/scss/sprite.scss",
+									{
+										format: "function_based_template"
+									}
+								]
+							]
+						},
+						apiOptions: {
+							cssImageRef: "@/assets/images/sprite.png"
+						},
+						customTemplates: {
+							function_based_template: spriteTemplate
+						}
+					})
 				: null
 		],
 		build: {
@@ -89,15 +96,36 @@ export default ({ mode }) => {
 					chunkFileNames: "js/[name]-[hash].js",
 					entryFileNames: "js/app-[hash].js",
 					assetFileNames: "assets/[ext]/[name]-[hash].[ext]",
-					// Pack router, i18n and other libraries into the thunk file separately
-					manualChunks: {
-						thunk: [] // "svelte-i18n"
+					// 手动分包配置 - 将公共资源抽离到 vendor
+					manualChunks: (id) => {
+						// 将 node_modules 中的第三方库分离到不同的 vendor 包
+						if (id.includes("node_modules")) {
+							// 视频播放器相关 - 单独分包（较大）
+							if (id.includes("xgplayer")) {
+								return "vendor-xgplayer";
+							}
+
+							// 其他小型第三方库统一打包到 vendor
+							return "vendor";
+						}
 					}
 				},
 				// 开启tree shaking
 				treeshake: true
-				// external: ['svelte-i18n', 'svelte-spa-router'],
-			}
+			},
+			// 优化构建性能
+			target: "es2015",
+			minify: isProduction ? "terser" : false,
+			// 分包大小限制和警告
+			chunkSizeWarningLimit: 1000,
+			// 启用 CSS 代码分割
+			cssCodeSplit: true,
+			// 构建时生成 sourcemap（生产环境可关闭）
+			sourcemap: !isProduction,
+			// 显示 gzip 压缩后的文件大小
+			reportCompressedSize: true,
+			// 优化资源内联阈值
+			assetsInlineLimit: 4096
 		},
 		resolve: {
 			alias: {
@@ -122,12 +150,12 @@ export default ({ mode }) => {
 					}),
 					autoprefixer()
 				]
-			},
-			preprocessorOptions: {
-				scss: {
-					additionalData: `@import "@/common/scss/mixin.scss";`
-				}
 			}
+			// preprocessorOptions: {
+			// 	scss: {
+			// 		additionalData: `@import "./src/common/scss/mixin.scss";`
+			// 	}
+			// }
 		}
 	});
 };
